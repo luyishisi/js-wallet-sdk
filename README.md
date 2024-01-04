@@ -1,5 +1,3 @@
-//test add by 14
-
 # js-wallet-sdk
 
 This is a typescript/javascript language wallet solution that supports offline transactions. We currently support various mainstream public

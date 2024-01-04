@@ -2,9 +2,6 @@ import {cloneObject, SignTxParams} from "@okxweb3/coin-base";
 import {BtcWallet} from "./BtcWallet";
 import * as bitcoin from "../index"
 import {networks, signBtc, utxoTx} from "../index"
-import {buildRuneData} from "../rune";
-import {base} from "@okxweb3/crypto-lib";
-import { error } from "console";
 
 export class AtomicalWallet extends BtcWallet {
 
@@ -12,8 +9,13 @@ export class AtomicalWallet extends BtcWallet {
         const clonedParamData = cloneObject(paramData)
         const atomicalInputMap = new Map<string, number>();
         const atomicalTypeMap = new Map<string, string>();
+        const atomicalSendMap = new Map<string, number>();
+
         let txInput = []
         let txOutput = []
+
+        const feePerB = clonedParamData.feeRate || 10; 
+        const dustSize = clonedParamData.minChangeValue || 546
 
         // Calculate the total Atomical asset input value from the 'input' field
         // and construct the 'input' field for the UTXO (Unspent Transaction Output).
@@ -21,6 +23,7 @@ export class AtomicalWallet extends BtcWallet {
         let inputs = clonedParamData.inputs;
         for (const input of inputs) {
             let dataArray = input.data;
+
             if (dataArray != null && dataArray instanceof Array) {
                 for (const data of dataArray) {
                     
@@ -47,6 +50,11 @@ export class AtomicalWallet extends BtcWallet {
                     }
                 }
             }
+
+            if (Object.keys(atomicalInputMap).length > 1){ 
+                throw new Error(JSON.stringify({ errCode:201 }))
+            }
+
             txInput.push({
                 txId:input.txId,
                 vOut:input.vOut,
@@ -61,7 +69,6 @@ export class AtomicalWallet extends BtcWallet {
         // If there are assets that haven't been completely transferred,
         // they will be automatically transferred back in the last transaction of their respective asset transfers.
         let outputs = clonedParamData.outputs;
-        const atomicalSendMap = new Map<string, number>();
         for (const output of outputs) {
             let dataArray = output.data;
             if (dataArray != null && dataArray instanceof Array) {
@@ -79,7 +86,7 @@ export class AtomicalWallet extends BtcWallet {
                     }
 
                     if (atomicalTypeMap.get(atomicalId) != atomicalIdType){
-                        throw new Error(`Error: AtomicalId ${atomicalId} does not exist in the map.`);
+                        throw new Error(JSON.stringify({ errCode:104 }))
                     }
 
                     let beforeAmount = atomicalSendMap.get(atomicalId);
@@ -87,8 +94,15 @@ export class AtomicalWallet extends BtcWallet {
                         atomicalSendMap.set(atomicalId, atomicalAmount);
                     } else {
                         atomicalSendMap.set(atomicalId, beforeAmount + atomicalAmount);
+                        // Avoid trying to bind the same NFT to multiple outputs 
+                        if (atomicalIdType == "NFT"){ 
+                            throw new Error(JSON.stringify({ errCode:201 }))
+                        }
                     }
                 }
+            }
+            if (Object.keys(atomicalSendMap).length > 1){ 
+                throw new Error(JSON.stringify({ errCode:201 }))
             }
             txOutput.push({
                 amount:output.amount,
@@ -102,40 +116,48 @@ export class AtomicalWallet extends BtcWallet {
             let inputAmount = atomicalInputMap.get(atomicalId);
             let sendAmount = atomicalSendMap.get(atomicalId);
 
-            // If some input assets lack corresponding outputs, all funds will be returned as change.
-            if (sendAmount == null) { 
-                sendAmount = 0;
-            }
+            if (atomicalTypeMap.get(atomicalId) == "FT"){
 
-            if (inputAmount != null && sendAmount != null && inputAmount > sendAmount) {
-                isAtomicalChange = true
-                let changeAmount = inputAmount - sendAmount
-                if (changeAmount < clonedParamData.minChangeValue){
-                    throw new Error(`Error: Output does not meet dust limit conditions. amount: ${changeAmount}.`);
+                // Disable signing if certain input assets lack corresponding outputs
+                if (sendAmount == null) { 
+                    throw new Error(JSON.stringify({ errCode:103 })) 
                 }
 
-                txOutput.push({
-                    address:clonedParamData.changeAddress,
-                    amount:changeAmount
-                })
-            } else if (inputAmount != null && sendAmount != null && inputAmount < sendAmount){ 
-                throw new Error(`Error: AtomicalId ${atomicalId} has insufficient input amount \
-                    (${inputAmount}) compared to the output amount (${sendAmount}).\
-                     This may lead to overspending and potential asset loss.`
-                );
+                if (inputAmount != null && sendAmount != null && inputAmount > sendAmount) {
+                    isAtomicalChange = true
+                    let changeAmount = inputAmount - sendAmount
+                    if (changeAmount < clonedParamData.minChangeValue){
+                        throw new Error(JSON.stringify({ 
+                            errCode:102,
+                            vOut: txOutput.length
+                        }))
+                    }
+                    // auto change
+                    txOutput.push({
+                        address:clonedParamData.changeAddress,
+                        amount:changeAmount
+                    })
+                } else if (inputAmount != null && sendAmount != null && inputAmount < sendAmount){ 
+                    throw new Error(JSON.stringify({ 
+                        errCode:100,
+                        date:{
+                            atomicalId: atomicalId,
+                            amount: inputAmount-sendAmount
+                        }
+                    }))
+                }
+            }else if (atomicalTypeMap.get(atomicalId) == "NFT"){
+                // Disable signing if certain input assets lack corresponding outputs
+                if (sendAmount == null) { 
+                    throw new Error(JSON.stringify({ errCode:103 })) 
+                }
             }
         }
 
-        if (clonedParamData.minChangeValue != null){
-            for (const curUtxo of txInput){
-                if (curUtxo.amount < clonedParamData.minChangeValue){
-                    throw new Error(`Error: Input does not meet dust limit conditions. amount: ${curUtxo.amount}.`);
-                }
-            }
-            for (const curUtxo of txOutput){
-                if (curUtxo.amount < clonedParamData.minChangeValue){
-                    throw new Error(`Error: Output does not meet dust limit conditions. amount: ${curUtxo.amount}.`);
-                }
+        // check all output dustSize
+        for (const [index, curUtxo] of txOutput.entries()){
+            if (curUtxo.amount < dustSize){
+                throw new Error(JSON.stringify({ errCode:102 , vOut:index }))
             }
         }
 
@@ -143,7 +165,7 @@ export class AtomicalWallet extends BtcWallet {
             inputs: txInput as [],
             outputs: txOutput as [],
             address: clonedParamData.changeAddress,
-            feePerB: clonedParamData.feeRate,
+            feePerB: feePerB,
         }
     }
 
@@ -163,9 +185,9 @@ export class AtomicalWallet extends BtcWallet {
 
     async estimateFee(param: SignTxParams): Promise<number> {
         try {
-            const runeTx = this.convert2AtomicalTx(param.data);
+            const atomicalTx = this.convert2AtomicalTx(param.data);
 
-            const fee = bitcoin.estimateBtcFee(runeTx, this.network());
+            const fee = bitcoin.estimateBtcFee(atomicalTx, this.network());
             return Promise.resolve(fee);
         } catch (e) {
             return Promise.reject(e);
